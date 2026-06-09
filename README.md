@@ -1,28 +1,44 @@
-# Deterministic Agent Harness
+![deterministic-agent-harness](docs/header.png)
 
-> A runtime harness that strips probabilistic behavior out of AI agents: the LLM classifies intent, and a hardcoded finite state machine does everything else.
+# 🔒 Deterministic Agent Harness - Deterministic AI Agent Runtime 🎯
 
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Pydantic](https://img.shields.io/badge/pydantic-v2-e92063)
-![Tests](https://img.shields.io/badge/tests-passing-brightgreen)
-![DRY_RUN](https://img.shields.io/badge/DRY__RUN-armed%20by%20default-orange)
-![License](https://img.shields.io/badge/license-MIT-lightgrey)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
+[![Pydantic](https://img.shields.io/badge/Pydantic-v2-e92063.svg)](https://docs.pydantic.dev)
+[![Tests](https://img.shields.io/badge/Tests-Passing-brightgreen.svg)](tests/test_harness.py)
+[![DRY_RUN](https://img.shields.io/badge/DRY__RUN-Armed%20By%20Default-orange.svg)](src/governor.py)
+
+**A runtime harness that strips probabilistic behavior out of AI agents - the LLM classifies intent into a strict JSON schema, and a hardcoded finite state machine does everything else.**
 
 **Author: A Taylor**
 
----
-
-## Why
-
-Large language models are excellent classifiers and terrible executors. When a model is allowed to choose its own actions at runtime, every run is a roll of the dice. This harness draws a hard line: the model may only map natural language onto a strict JSON schema. From that point on, execution is resolved entirely from static tables frozen at import time. The model never selects a state transition, never names a file path, never invents a verb.
+> 🚧 **Status:** Governor FSM stable · Flight Recorder live · 26/26 tests passing
 
 ---
 
-## Architecture
+## 🤔 The Problem
 
-### The Pipeline
+Large language models are excellent classifiers and terrible executors. When a model is allowed to choose its own actions at runtime, every run is a roll of the dice: invented verbs, improvised file paths, hallucinated transitions, and side effects nobody asked for. Compliance, finance, and operations workflows cannot tolerate any of that.
 
-```text
+---
+
+## 💡 The Solution
+
+The harness draws a hard trust boundary. The model may only map natural language onto a strict JSON schema. From that point on, execution is resolved entirely from static tables frozen at import time:
+
+- 🧾 **Classify** natural language into a closed intent enum - unsupported requests map to `unsupported`, never to a guess
+- 🛂 **Validate** every envelope with Pydantic v2 (`extra="forbid"`, bounded confidence, identifier-only payload keys)
+- 🗺️ **Route** intents through a static intent-to-workflow table - the LLM never selects a transition
+- ⚙️ **Execute** a rigid FSM where `COMPLETED` and `HALTED` are terminal states with zero outgoing edges
+- 🛑 **Halt** with typed reasons only: `schema_violation`, `unsupported_intent`, `illegal_transition`, `step_failure`, `dry_run_block`
+- 🔐 **Block** every side-effectful step before invocation while the `DRY_RUN` gate is armed (the default)
+- ✈️ **Record** every input, transition, output, and halt to an append-only, SHA-256 hash-chained audit log
+
+---
+
+## 🏛️ Architecture
+
+```
                 PROBABILISTIC ZONE                  DETERMINISTIC ZONE
  .................................................  ...............................................
  :                                               :  :                                             :
@@ -57,9 +73,9 @@ Large language models are excellent classifiers and terrible executors. When a m
                                                     :.............................................:
 ```
 
-### The State Machine
+### 🔁 The State Machine
 
-```text
+```
                           +-------------------------------------------+
                           |                                           |
    IDLE --> INTENT_RECEIVED --> VALIDATING --> EXECUTING --> COMPLETED
@@ -71,45 +87,44 @@ Large language models are excellent classifiers and terrible executors. When a m
                         [ HALTED ]  (terminal failure state)
 ```
 
-`COMPLETED` and `HALTED` are terminal: the transition table assigns them zero outgoing edges, and a unit test enforces it. Every halt carries a typed reason: `schema_violation`, `unsupported_intent`, `illegal_transition`, `step_failure`, or `dry_run_block`. There are no free-text failure modes.
+`COMPLETED` and `HALTED` are terminal: the transition table assigns them zero outgoing edges, and a unit test enforces it. Every halt carries a typed reason. There are no free-text failure modes.
 
 ---
 
-## Security Boundaries
+## 🛡️ Security Boundaries
 
-> **Zero-liability security model.** The harness ships inert. `DRY_RUN` is armed by default, and while it is armed the Governor blocks every step declared `side_effectful=True` before the step is ever invoked, halting with `dry_run_block`. The host environment cannot be touched by accident, by misconfiguration, or by a model that hallucinated an action. You must explicitly set the literal string `DRY_RUN=false` to allow side effects.
+> ⚠️ **Zero-liability security model.** The harness ships inert. `DRY_RUN` is armed by default, and while it is armed the Governor blocks every step declared `side_effectful=True` before the step is ever invoked, halting with `dry_run_block`. The host environment cannot be touched by accident, by misconfiguration, or by a model that hallucinated an action. You must explicitly set the literal string `DRY_RUN=false` to allow side effects.
 
-> **No shell, no subprocess, ever.** The execution layer contains no subprocess imports, no shell invocation of any kind, and no pty access. This is not a convention: it is enforced by a unit test that scans every source file in `src/` and `workflows/` for the banned call patterns and fails the build if any appear.
+> 🚫 **No shell, no subprocess, ever.** The execution layer contains no subprocess imports, no shell invocation of any kind, and no pty access. This is not a convention: it is enforced by a unit test that scans every source file in `src/` and `workflows/` for the banned call patterns and fails the build if any appear.
 
-### Environment Variables
+### 🔧 Environment Variables
 
-| Variable  | Default        | Accepted values                                       | Effect                                                                 |
-| --------- | -------------- | ----------------------------------------------------- | ---------------------------------------------------------------------- |
-| `DRY_RUN` | armed (unset)  | Only the literal `false` (case-insensitive) disarms   | Armed: side-effectful steps halt with `dry_run_block` before invocation |
-|           |                | `0`, `no`, `off`, empty string all keep it armed      | Disarmed: the `persist` step may write to the fixed `artifacts/` path   |
+| Env Var | Default | Accepted Values | Effect |
+|---------|---------|-----------------|--------|
+| `DRY_RUN` | 🔒 Armed (unset) | Only the literal `false` (case-insensitive) disarms; `0`, `no`, `off`, and empty string all keep it armed | Armed: side-effectful steps halt with `dry_run_block` before invocation. Disarmed: the `persist` step may write to the fixed `artifacts/` path |
 
-### Type Validation Enforcements
+### 🛂 Type Validation Enforcements
 
-| Boundary              | Contract                              | Enforcement                                        | Failure behavior                          |
-| --------------------- | ------------------------------------- | -------------------------------------------------- | ----------------------------------------- |
-| LLM output            | `IntentEnvelope`                      | `extra="forbid"`, closed `IntentType` enum         | Halt with `schema_violation`              |
-| Intent confidence     | `confidence` in `[0.0, 1.0]`          | Pydantic bounded float                             | Halt with `schema_violation`              |
-| Payload keys          | Valid Python identifiers only         | Custom field validator                             | Halt with `schema_violation`              |
-| Intent routing        | Static routing table                  | Frozen dict, `UNSUPPORTED` routes to nothing       | Halt with `unsupported_intent`            |
-| Each workflow step    | `ComplianceRecord` re-validation      | Regex-constrained fields, re-parsed at every step  | Typed `StepResult` failure, `step_failure` |
-| State transitions     | `TRANSITIONS` table                   | Frozen at import time, checked on every move       | Halt with `illegal_transition`            |
-| Side effects          | `side_effectful=True` declaration     | Checked against `DRY_RUN` before invocation        | Halt with `dry_run_block`                 |
+| Boundary | Contract | Enforcement | Failure Behavior |
+|----------|----------|-------------|------------------|
+| 🤖 LLM output | `IntentEnvelope` | `extra="forbid"`, closed `IntentType` enum | Halt with `schema_violation` |
+| 📊 Intent confidence | `confidence` in `[0.0, 1.0]` | Pydantic bounded float | Halt with `schema_violation` |
+| 🔑 Payload keys | Valid Python identifiers only | Custom field validator | Halt with `schema_violation` |
+| 🗺️ Intent routing | Static routing table | Frozen dict, `unsupported` routes to nothing | Halt with `unsupported_intent` |
+| 📄 Each workflow step | `ComplianceRecord` re-validation | Regex-constrained fields, re-parsed at every step | Typed `StepResult` failure, `step_failure` |
+| 🔁 State transitions | `TRANSITIONS` table | Frozen at import time, checked on every move | Halt with `illegal_transition` |
+| 💥 Side effects | `side_effectful=True` declaration | Checked against `DRY_RUN` before invocation | Halt with `dry_run_block` |
 
-### Expected Audit Log Outputs
+### ✈️ Expected Audit Log Outputs
 
-| Event            | When emitted                                   | Key detail fields            |
-| ---------------- | ---------------------------------------------- | ---------------------------- |
-| `input_received` | Raw intent arrives, before any parsing         | `raw`                        |
-| `transition`     | Before every state change takes effect         | `from`, `to`                 |
-| `step_input`     | Before each workflow step is invoked           | `step`, `input`              |
-| `step_output`    | After each workflow step returns               | `step`, `ok`, `error`        |
-| `halt`           | Before the machine moves to `HALTED`           | `reason`, `detail`           |
-| `completed`      | On successful arrival at `COMPLETED`           | `output`                     |
+| Event | When Emitted | Key Detail Fields |
+|-------|--------------|-------------------|
+| 📥 `input_received` | Raw intent arrives, before any parsing | `raw` |
+| 🔁 `transition` | Before every state change takes effect | `from`, `to` |
+| ▶️ `step_input` | Before each workflow step is invoked | `step`, `input` |
+| ◀️ `step_output` | After each workflow step returns | `step`, `ok`, `error` |
+| 🛑 `halt` | Before the machine moves to `HALTED` | `reason`, `detail` |
+| ✅ `completed` | On successful arrival at `COMPLETED` | `output` |
 
 Sample audit log line (append-only JSONL, SHA-256 hash chain per line):
 
@@ -121,15 +136,17 @@ Each line's `hash` is computed over the previous line's hash plus a canonical se
 
 ---
 
-## Repository Structure
+## 📁 Repository Layout
 
-```text
+```
 deterministic-agent-harness/
 ├── README.md
 ├── LICENSE
 ├── requirements.txt
 ├── pytest.ini
 ├── .gitignore
+├── docs/
+│   └── header.png             # README header graphic
 ├── schemas/
 │   ├── __init__.py
 │   └── models.py              # Pydantic v2 contracts: IntentEnvelope, ComplianceRecord, StepResult, AuditEvent
@@ -147,55 +164,61 @@ deterministic-agent-harness/
 
 ---
 
-## Quick Start
+## 🏁 Quick Start
 
-1. Clone and enter the repository:
+1. **Clone** the repository:
 
-   ```sh
+   ```bash
    git clone https://github.com/ATaylorAerospace/Deterministic-Agent-Harness.git
    cd Deterministic-Agent-Harness
    ```
 
-2. Install the two dependencies:
+2. **Install** the two dependencies:
 
-   ```sh
+   ```bash
    pip install -r requirements.txt
    ```
 
-3. Run the test suite:
+3. **Run** the test suite:
 
-   ```sh
+   ```bash
    pytest -v
    ```
 
-4. Drive the example workflow. With the gate armed (the default), the side-effectful persist step is blocked and the run halts with `dry_run_block`:
+4. **Drive** the example workflow. With the gate armed (the default), the side-effectful persist step is blocked and the run halts with `dry_run_block`:
 
-   ```sh
+   ```bash
    python -c "from src.governor import Governor; from src.logger import FlightRecorder; from workflows.example_workflow import build_routing_table; g = Governor(build_routing_table(), FlightRecorder('logs/audit.jsonl')); print(g.run({'intent': 'submit_compliance_record', 'confidence': 0.97, 'payload': {'record_id': 'REC-000123', 'account': 'ACCT-AB12CD', 'amount': '12500.00', 'currency': 'USD', 'submitted_by': 'a.taylor'}}))"
    ```
 
-5. Run the same command with the gate explicitly disarmed and the workflow completes, writing to `artifacts/compliance_records.jsonl`:
+5. **Disarm** the gate explicitly and the same command completes, writing to `artifacts/compliance_records.jsonl`:
 
-   ```sh
+   ```bash
    DRY_RUN=false python -c "from src.governor import Governor; from src.logger import FlightRecorder; from workflows.example_workflow import build_routing_table; g = Governor(build_routing_table(), FlightRecorder('logs/audit.jsonl')); print(g.run({'intent': 'submit_compliance_record', 'confidence': 0.97, 'payload': {'record_id': 'REC-000123', 'account': 'ACCT-AB12CD', 'amount': '12500.00', 'currency': 'USD', 'submitted_by': 'a.taylor'}}))"
    ```
 
 ---
 
-## Components
+## 🧩 Components
 
-1. **`schemas/models.py`**: Pydantic v2 contracts. A closed `IntentType` enum (unsupported requests map to `unsupported`), an `IntentEnvelope` with `extra="forbid"`, a confidence field bounded to `[0.0, 1.0]`, payload keys restricted to valid Python identifiers, a regex-constrained `ComplianceRecord`, an immutable `StepResult`, and a frozen `AuditEvent` with UTC timestamps.
-2. **`src/governor.py`**: The Governor FSM. A static `TRANSITIONS` table frozen at import time maps each state to its legal successors, with `COMPLETED` and `HALTED` terminal. Every exception converts to a typed halt, every transition and halt is written to the Flight Recorder before execution proceeds, and side-effectful steps are blocked under `DRY_RUN` before they are invoked.
-3. **`src/logger.py`**: The Flight Recorder. Append-only JSONL with a SHA-256 hash chain per line, canonical JSON serialization so record and verify are symmetric, flush plus fsync on every write, a `verify()` method, chain resumption across restarts, and no deletion or rewrite API.
-4. **`workflows/example_workflow.py`**: A 3-step compliance workflow: `validate` (Pydantic gate), `transform` (a fixed business rule flagging records at or above the static 10,000.00 review threshold), and `persist` (side-effectful, fixed `artifacts/` path, blocked under dry run). Each step re-validates its input, returns a typed `StepResult`, and fails with an explicit typed fallback. `build_routing_table()` returns the complete static intent-to-workflow map.
-5. **`tests/test_harness.py`**: The verification suite covering FSM shape, the happy path, every `DRY_RUN` arming rule, schema injection, payload key constraints, unsupported intents, malformed domain records, the full Flight Recorder tamper-detection cycle, and a static source scan asserting no shell or subprocess facility exists anywhere in the execution layer.
+| Module | Role | Key Guarantees | Status |
+|--------|------|----------------|--------|
+| 📐 **`schemas/models.py`** | Pydantic v2 contracts | Closed `IntentType` enum, `extra="forbid"` envelope, bounded confidence, identifier-only payload keys, regex-constrained `ComplianceRecord`, frozen `StepResult` and `AuditEvent` with UTC timestamps | ✅ Stable |
+| ⚙️ **`src/governor.py`** | Governor FSM | Static `TRANSITIONS` table frozen at import time, terminal `COMPLETED`/`HALTED`, typed halts for every exception, side-effect block under `DRY_RUN`, audit before every move | ✅ Stable |
+| ✈️ **`src/logger.py`** | Flight Recorder | Append-only JSONL, SHA-256 hash chain per line, canonical serialization, flush + fsync per write, `verify()`, chain resumption across restarts, no delete or rewrite API | ✅ Stable |
+| 📋 **`workflows/example_workflow.py`** | 3-step compliance workflow | `validate` (Pydantic gate), `transform` (static 10,000.00 review threshold), `persist` (fixed `artifacts/` path, blocked under dry run), `build_routing_table()` static map | ✅ Stable |
+| 🧪 **`tests/test_harness.py`** | Verification suite | FSM shape, dry-run arming rules, schema injection, tamper detection, no-shell source scan | ✅ 26 passing |
 
 ---
 
-## Verification
+## 🧪 Verification
 
-```text
-$ pytest -v
+```bash
+# Run all tests
+pytest -v
+```
+
+```
 tests/test_harness.py::test_terminal_states_have_no_outgoing_edges PASSED
 tests/test_harness.py::test_every_state_appears_in_transition_table PASSED
 tests/test_harness.py::test_happy_path_reaches_completed PASSED
@@ -226,14 +249,28 @@ tests/test_harness.py::test_no_shell_or_subprocess_in_execution_layer PASSED
 26 passed
 ```
 
+Tests cover:
+- ✅ Terminal states have zero outgoing edges
+- ✅ Happy path reaches `COMPLETED`
+- ✅ `DRY_RUN` defaults to armed; only the literal `false` disarms (`0`, `no`, `off`, empty all stay armed)
+- ✅ Side-effectful steps blocked under dry run with `dry_run_block`
+- ✅ Persistence executes only when the gate is explicitly disarmed
+- ✅ Injected unknown fields (`execute_shell`) halt with `schema_violation` before any step runs
+- ✅ Non-identifier payload keys and out-of-bounds confidence rejected
+- ✅ Unsupported and invented intents halt safely
+- ✅ Malformed domain records fail at the validate gate
+- ✅ Flight Recorder verifies clean logs, detects doctored lines, resumes its chain across restarts
+- ✅ Static source scan: no subprocess import, no shell call, no pty access anywhere in the execution layer
+
 ---
 
-## License
+## 👤 Author
 
-MIT License, Copyright (c) 2026 A Taylor. See [LICENSE](LICENSE).
+**A Taylor** · 2026
 
 ---
 
-## Author
+## 📄 License
 
-**A Taylor**
+MIT © 2026 A Taylor
+See [LICENSE](LICENSE) for details.
