@@ -6,7 +6,7 @@
 ![Pydantic](https://img.shields.io/badge/pydantic-v2-e92063)
 ![Tests](https://img.shields.io/badge/tests-passing-brightgreen)
 ![DRY_RUN](https://img.shields.io/badge/DRY__RUN-armed%20by%20default-orange)
-![License](https://img.shields.io/badge/license-Apache%202.0-lightgrey)
+![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 **Author: A Taylor**
 
@@ -230,7 +230,7 @@ tests/test_harness.py::test_no_shell_or_subprocess_in_execution_layer PASSED
 
 ## License
 
-Apache License 2.0, Copyright (c) 2026 A Taylor. See [LICENSE](LICENSE).
+MIT License, Copyright (c) 2026 A Taylor. See [LICENSE](LICENSE).
 
 ---
 
