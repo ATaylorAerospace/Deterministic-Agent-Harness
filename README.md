@@ -2,6 +2,7 @@
 
 # 🔒 Deterministic Agent Harness - Deterministic AI Agent Runtime 🎯
 
+[![CI](https://github.com/ATaylorAerospace/Deterministic-Agent-Harness/actions/workflows/ci.yml/badge.svg)](https://github.com/ATaylorAerospace/Deterministic-Agent-Harness/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
 [![Pydantic](https://img.shields.io/badge/Pydantic-v2-e92063.svg)](https://docs.pydantic.dev)
@@ -140,6 +141,9 @@ Each line's `hash` is computed over the previous line's hash plus a canonical se
 
 ```
 deterministic-agent-harness/
+├── .github/
+│   └── workflows/
+│       └── ci.yml             # CI: pytest on push and PR (Python 3.10, 3.11, 3.12)
 ├── README.md
 ├── CONTRIBUTING.md            # Contribution guidelines and PR workflow
 ├── LICENSE
