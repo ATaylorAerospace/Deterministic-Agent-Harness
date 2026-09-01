@@ -11,12 +11,14 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from schemas.models import HaltReason, IntentEnvelope, IntentType
+from schemas.models import HaltReason, IntentEnvelope, IntentType, StepResult
 from src.governor import (
+    MAX_STEPS_PER_RUN,
     TERMINAL_STATES,
     TRANSITIONS,
     Governor,
     State,
+    WorkflowStep,
     dry_run_armed,
 )
 from src.logger import FlightRecorder
@@ -233,6 +235,60 @@ def test_governor_run_produces_verifiable_audit_trail(tmp_path):
     assert "input_received" in events
     assert "transition" in events
     assert "halt" in events
+
+
+# ------------------------------------------------- runtime containment bounds
+
+
+def test_step_budget_exceeded_halts_with_typed_reason(tmp_path):
+    noop = WorkflowStep(
+        name="noop",
+        run=lambda data: StepResult(step="noop", ok=True, output=data),
+    )
+    oversized = {IntentType.SUBMIT_COMPLIANCE_RECORD: [noop] * (MAX_STEPS_PER_RUN + 1)}
+    recorder = FlightRecorder(tmp_path / "audit.jsonl")
+    outcome = Governor(oversized, recorder).run(good_intent())
+    assert outcome.final_state is State.HALTED
+    assert outcome.halt_reason is HaltReason.STEP_BUDGET_EXCEEDED
+
+
+def test_persist_is_idempotent_on_replay(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DRY_RUN", "false")
+    first = make_governor(tmp_path).run(good_intent())
+    second = make_governor(tmp_path).run(good_intent())
+    assert first.final_state is State.COMPLETED
+    assert second.final_state is State.COMPLETED
+    assert first.output["idempotent_replay"] is False
+    assert second.output["idempotent_replay"] is True
+    rows = [r for r in PERSIST_PATH.read_text().splitlines() if r.strip()]
+    assert len(rows) == 1
+
+
+def test_audit_events_carry_run_id_and_monotonic_seq(tmp_path):
+    recorder = FlightRecorder(tmp_path / "audit.jsonl")
+    governor = Governor(build_routing_table(), recorder)
+    outcome = governor.run({"intent": "unsupported", "confidence": 0.5, "payload": {}})
+    entries = [
+        json.loads(line)["entry"]
+        for line in recorder.path.read_text().splitlines()
+        if line.strip()
+    ]
+    assert entries
+    assert {entry["run_id"] for entry in entries} == {outcome.run_id}
+    assert [entry["seq"] for entry in entries] == list(range(len(entries)))
+
+
+def test_run_never_raises_even_when_recorder_fails(tmp_path):
+    class BrokenRecorder:
+        path = tmp_path / "missing.jsonl"
+
+        def record(self, entry):
+            raise OSError("disk full")
+
+    outcome = Governor(build_routing_table(), BrokenRecorder()).run(good_intent())
+    assert outcome.final_state is State.HALTED
+    assert outcome.halt_reason is HaltReason.STEP_FAILURE
 
 
 # --------------------------------------------------------- static source scan
