@@ -37,6 +37,7 @@ class HaltReason(str, Enum):
     ILLEGAL_TRANSITION = "illegal_transition"
     STEP_FAILURE = "step_failure"
     DRY_RUN_BLOCK = "dry_run_block"
+    STEP_BUDGET_EXCEEDED = "step_budget_exceeded"
 
 
 class IntentEnvelope(BaseModel):
@@ -68,9 +69,10 @@ class ComplianceRecord(BaseModel):
 
     Field shapes are pinned with regular expressions so malformed data
     fails loudly at the validation gate instead of drifting downstream.
+    The model is frozen: once validated, a record cannot be mutated.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     record_id: str = Field(pattern=r"^REC-[0-9]{6}$")
     account: str = Field(pattern=r"^ACCT-[A-Z0-9]{4,12}$")
@@ -95,11 +97,18 @@ def _utc_now() -> datetime:
 
 
 class AuditEvent(BaseModel):
-    """Immutable audit record written to the Flight Recorder."""
+    """Immutable audit record written to the Flight Recorder.
+
+    run_id and seq make every run reconstructable from the log alone:
+    all events of one run share a run_id, and seq increases by one per
+    event, so gaps or reordering are visible without manual stitching.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     event: str
+    run_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    seq: int = Field(ge=0)
     timestamp: datetime = Field(default_factory=_utc_now)
     details: Dict[str, Any] = Field(default_factory=dict)
 

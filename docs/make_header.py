@@ -91,14 +91,15 @@ greens = [
     (412, 704, "~ Static Routing ~",
      ["Complete intent to", "workflow map, built", "once, no improvised", "routes"]),
     (762, 1054, "~ Typed Halts ~",
-     ["schema_violation,", "unsupported_intent,", "illegal_transition,", "step_failure, dry_run_block"]),
+     ["schema_violation,", "unsupported_intent,", "illegal_transition,",
+      "step_failure, dry_run_block,", "step_budget_exceeded"]),
 ]
 for x0, x1, title, lines in greens:
     rbox(x0, 408, x1, 560, GREEN, radius=12)
     cx = (x0 + x1) // 2
     ctext(cx, 432, title, font(18, bold=True), WHITE)
     for i, line in enumerate(lines):
-        ctext(cx, 468 + i * 22, line, font(14, italic=True), WHITE)
+        ctext(cx, 460 + i * 20, line, font(14, italic=True), WHITE)
 
 arrow(CX, 580, 652 + 38)
 ctext(CX + 12, 600, "validated IntentEnvelope only", font(13, italic=True), BLACK,
