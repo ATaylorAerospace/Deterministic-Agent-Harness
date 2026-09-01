@@ -17,6 +17,7 @@ ever invoked.
 from __future__ import annotations
 
 import os
+import uuid
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
@@ -52,6 +53,12 @@ TRANSITIONS: Mapping[State, frozenset[State]] = MappingProxyType(
 
 TERMINAL_STATES = frozenset({State.COMPLETED, State.HALTED})
 
+# Static step budget: a hard upper bound on workflow steps per run.
+# Workflows here are static sequences, so this can never trigger on a
+# well-formed routing table; it is a containment bound that holds even
+# if a future workflow is misdeclared or generated programmatically.
+MAX_STEPS_PER_RUN = 32
+
 
 def dry_run_armed() -> bool:
     """True unless DRY_RUN is the literal string "false" (any case).
@@ -74,12 +81,17 @@ class WorkflowStep:
 
 @dataclass(frozen=True)
 class RunOutcome:
-    """Final, immutable result of a Governor run."""
+    """Final, immutable result of a Governor run.
+
+    run_id matches the run_id stamped on every audit event of the run,
+    so an outcome can be correlated with its full audit trail directly.
+    """
 
     final_state: State
     halt_reason: Optional[HaltReason]
     detail: str
     output: Dict[str, Any]
+    run_id: str
 
 
 class Governor:
@@ -93,20 +105,31 @@ class Governor:
         self._routing = dict(routing_table)
         self._recorder = recorder
         self._state = State.IDLE
+        self._run_id = uuid.uuid4().hex
+        self._seq = 0
 
     @property
     def state(self) -> State:
         return self._state
 
+    @property
+    def run_id(self) -> str:
+        return self._run_id
+
     def _audit(self, event: str, details: Dict[str, Any]) -> None:
-        record = AuditEvent(event=event, details=details)
+        record = AuditEvent(
+            event=event, run_id=self._run_id, seq=self._seq, details=details
+        )
         self._recorder.record(
             {
                 "event": record.event,
+                "run_id": record.run_id,
+                "seq": record.seq,
                 "timestamp": record.timestamp.isoformat(),
                 "details": record.details,
             }
         )
+        self._seq += 1
 
     def _transition(self, target: State) -> bool:
         """Move to target if the static table allows it.
@@ -123,16 +146,25 @@ class Governor:
         return True
 
     def _halt(self, reason: HaltReason, detail: str) -> RunOutcome:
-        self._audit("halt", {"reason": reason.value, "detail": detail})
-        if self._state not in TERMINAL_STATES:
-            if State.HALTED in TRANSITIONS[self._state]:
-                self._transition(State.HALTED)
-            else:
-                # Unreachable with the static table above, but never
-                # leave the machine in a live state after a halt.
+        # A halt must never raise, even when the Flight Recorder itself
+        # is the component that failed: the typed outcome is the caller's
+        # only guarantee, so audit best-effort and force a terminal state.
+        try:
+            self._audit("halt", {"reason": reason.value, "detail": detail})
+            if self._state not in TERMINAL_STATES:
+                if State.HALTED in TRANSITIONS[self._state]:
+                    self._transition(State.HALTED)
+        except Exception:
+            pass
+        finally:
+            if self._state not in TERMINAL_STATES:
                 self._state = State.HALTED
         return RunOutcome(
-            final_state=self._state, halt_reason=reason, detail=detail, output={}
+            final_state=self._state,
+            halt_reason=reason,
+            detail=detail,
+            output={},
+            run_id=self._run_id,
         )
 
     def run(self, raw_intent: Dict[str, Any]) -> RunOutcome:
@@ -174,7 +206,12 @@ class Governor:
             return self._halt(HaltReason.ILLEGAL_TRANSITION, "cannot enter EXECUTING")
 
         data: Dict[str, Any] = dict(envelope.payload)
-        for step in steps:
+        for index, step in enumerate(steps):
+            if index >= MAX_STEPS_PER_RUN:
+                return self._halt(
+                    HaltReason.STEP_BUDGET_EXCEEDED,
+                    f"workflow exceeds the static budget of {MAX_STEPS_PER_RUN} steps",
+                )
             if step.side_effectful and dry_run_armed():
                 return self._halt(
                     HaltReason.DRY_RUN_BLOCK,
@@ -207,5 +244,9 @@ class Governor:
             return self._halt(HaltReason.ILLEGAL_TRANSITION, "cannot enter COMPLETED")
         self._audit("completed", {"output": data})
         return RunOutcome(
-            final_state=self._state, halt_reason=None, detail="ok", output=data
+            final_state=self._state,
+            halt_reason=None,
+            detail="ok",
+            output=data,
+            run_id=self._run_id,
         )
