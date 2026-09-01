@@ -13,7 +13,7 @@
 
 **Author: A Taylor**
 
-> 🚧 **Status:** Governor FSM stable · Flight Recorder live · 26/26 tests passing
+> 🚧 **Status:** Governor FSM stable · Flight Recorder live · 30/30 tests passing
 
 ---
 
@@ -31,9 +31,12 @@ The harness draws a hard trust boundary. The model may only map natural language
 - 🛂 **Validate** every envelope with Pydantic v2 (`extra="forbid"`, bounded confidence, identifier-only payload keys)
 - 🗺️ **Route** intents through a static intent-to-workflow table - the LLM never selects a transition
 - ⚙️ **Execute** a rigid FSM where `COMPLETED` and `HALTED` are terminal states with zero outgoing edges
-- 🛑 **Halt** with typed reasons only: `schema_violation`, `unsupported_intent`, `illegal_transition`, `step_failure`, `dry_run_block`
+- 🛑 **Halt** with typed reasons only: `schema_violation`, `unsupported_intent`, `illegal_transition`, `step_failure`, `dry_run_block`, `step_budget_exceeded`
 - 🔐 **Block** every side-effectful step before invocation while the `DRY_RUN` gate is armed (the default)
+- 📏 **Bound** every run with a static step budget so no workflow, however misdeclared, can run away
+- 🔁 **Replay** safely: the side-effectful persist step is idempotent, keyed on the record's natural operation ID, with read-after-write verification
 - ✈️ **Record** every input, transition, output, and halt to an append-only, SHA-256 hash-chained audit log
+- 🧾 **Correlate** every outcome with its full audit trail: each run stamps a `run_id` and a monotonic `seq` on every event
 
 ---
 
@@ -88,7 +91,7 @@ The harness draws a hard trust boundary. The model may only map natural language
                         [ HALTED ]  (terminal failure state)
 ```
 
-`COMPLETED` and `HALTED` are terminal: the transition table assigns them zero outgoing edges, and a unit test enforces it. Every halt carries a typed reason. There are no free-text failure modes.
+`COMPLETED` and `HALTED` are terminal: the transition table assigns them zero outgoing edges, and a unit test enforces it. Every halt carries a typed reason (`schema_violation`, `unsupported_intent`, `illegal_transition`, `step_failure`, `dry_run_block`, or `step_budget_exceeded`). There are no free-text failure modes, and `Governor.run()` never raises: even a failing audit disk collapses into a typed halt.
 
 ---
 
@@ -115,6 +118,8 @@ The harness draws a hard trust boundary. The model may only map natural language
 | 📄 Each workflow step | `ComplianceRecord` re-validation | Regex-constrained fields, re-parsed at every step | Typed `StepResult` failure, `step_failure` |
 | 🔁 State transitions | `TRANSITIONS` table | Frozen at import time, checked on every move | Halt with `illegal_transition` |
 | 💥 Side effects | `side_effectful=True` declaration | Checked against `DRY_RUN` before invocation | Halt with `dry_run_block` |
+| 📏 Run length | At most `MAX_STEPS_PER_RUN` (32) steps | Counted in the Governor execution loop | Halt with `step_budget_exceeded` |
+| 🔂 Replayed side effects | One row per `record_id`, ever | Idempotency check plus read-after-write verification in `persist` | Typed `StepResult` failure, `step_failure` |
 
 ### ✈️ Expected Audit Log Outputs
 
@@ -127,10 +132,12 @@ The harness draws a hard trust boundary. The model may only map natural language
 | 🛑 `halt` | Before the machine moves to `HALTED` | `reason`, `detail` |
 | ✅ `completed` | On successful arrival at `COMPLETED` | `output` |
 
+Every event also carries a `run_id` (shared by all events of one run and returned on the `RunOutcome`) and a monotonic `seq`, so a complete run can be reconstructed from the log alone, with gaps or reordering immediately visible.
+
 Sample audit log line (append-only JSONL, SHA-256 hash chain per line):
 
 ```json
-{"entry":{"details":{"from":"IDLE","to":"INTENT_RECEIVED"},"event":"transition","timestamp":"2026-01-15T12:00:00.000000+00:00"},"hash":"9f2c...e41a","prev":"0000...0000"}
+{"entry":{"details":{"from":"IDLE","to":"INTENT_RECEIVED"},"event":"transition","run_id":"3f2a9c1d8b7e4f60a1c2d3e4f5a6b7c8","seq":1,"timestamp":"2026-01-15T12:00:00.000000+00:00"},"hash":"9f2c...e41a","prev":"0000...0000"}
 ```
 
 Each line's `hash` is computed over the previous line's hash plus a canonical serialization of the entry, so editing, deleting, or reordering any line breaks the chain. `FlightRecorder.verify()` detects the first broken line, and the chain resumes correctly across process restarts.
@@ -208,11 +215,11 @@ deterministic-agent-harness/
 
 | Module | Role | Key Guarantees | Status |
 |--------|------|----------------|--------|
-| 📐 **`schemas/models.py`** | Pydantic v2 contracts | Closed `IntentType` enum, `extra="forbid"` envelope, bounded confidence, identifier-only payload keys, regex-constrained `ComplianceRecord`, frozen `StepResult` and `AuditEvent` with UTC timestamps | ✅ Stable |
-| ⚙️ **`src/governor.py`** | Governor FSM | Static `TRANSITIONS` table frozen at import time, terminal `COMPLETED`/`HALTED`, typed halts for every exception, side-effect block under `DRY_RUN`, audit before every move | ✅ Stable |
+| 📐 **`schemas/models.py`** | Pydantic v2 contracts | Closed `IntentType` enum, `extra="forbid"` envelope, bounded confidence, identifier-only payload keys, regex-constrained frozen `ComplianceRecord`, frozen `StepResult` and `AuditEvent` with UTC timestamps | ✅ Stable |
+| ⚙️ **`src/governor.py`** | Governor FSM | Static `TRANSITIONS` table frozen at import time, terminal `COMPLETED`/`HALTED`, typed halts for every exception (a failing recorder included), static step budget, per-run `run_id` with monotonic `seq`, side-effect block under `DRY_RUN`, audit before every move | ✅ Stable |
 | ✈️ **`src/logger.py`** | Flight Recorder | Append-only JSONL, SHA-256 hash chain per line, canonical serialization, flush + fsync per write, `verify()`, chain resumption across restarts, no delete or rewrite API | ✅ Stable |
-| 📋 **`workflows/example_workflow.py`** | 3-step compliance workflow | `validate` (Pydantic gate), `transform` (static 10,000.00 review threshold), `persist` (fixed `artifacts/` path, blocked under dry run), `build_routing_table()` static map | ✅ Stable |
-| 🧪 **`tests/test_harness.py`** | Verification suite | FSM shape, dry-run arming rules, schema injection, tamper detection, no-shell source scan | ✅ 26 passing |
+| 📋 **`workflows/example_workflow.py`** | 3-step compliance workflow | `validate` (Pydantic gate), `transform` (static 10,000.00 review threshold), `persist` (fixed `artifacts/` path, blocked under dry run, idempotent by `record_id` with read-after-write verification), `build_routing_table()` static map | ✅ Stable |
+| 🧪 **`tests/test_harness.py`** | Verification suite | FSM shape, dry-run arming rules, schema injection, step budget, idempotent replay, audit correlation, tamper detection, no-shell source scan | ✅ 30 passing |
 
 ---
 
@@ -249,9 +256,13 @@ tests/test_harness.py::test_flight_recorder_verifies_clean_log PASSED
 tests/test_harness.py::test_flight_recorder_detects_doctored_line PASSED
 tests/test_harness.py::test_flight_recorder_chain_resumes_across_restarts PASSED
 tests/test_harness.py::test_governor_run_produces_verifiable_audit_trail PASSED
+tests/test_harness.py::test_step_budget_exceeded_halts_with_typed_reason PASSED
+tests/test_harness.py::test_persist_is_idempotent_on_replay PASSED
+tests/test_harness.py::test_audit_events_carry_run_id_and_monotonic_seq PASSED
+tests/test_harness.py::test_run_never_raises_even_when_recorder_fails PASSED
 tests/test_harness.py::test_no_shell_or_subprocess_in_execution_layer PASSED
 
-26 passed
+30 passed
 ```
 
 Tests cover:
@@ -265,6 +276,10 @@ Tests cover:
 - ✅ Unsupported and invented intents halt safely
 - ✅ Malformed domain records fail at the validate gate
 - ✅ Flight Recorder verifies clean logs, detects doctored lines, resumes its chain across restarts
+- ✅ Oversized workflows halt with `step_budget_exceeded` at the static step budget
+- ✅ Replayed runs never duplicate the persisted side effect (idempotency by `record_id`)
+- ✅ Every audit event carries the run's `run_id` and a strictly monotonic `seq`
+- ✅ `Governor.run()` returns a typed halt instead of raising, even when the audit recorder itself fails
 - ✅ Static source scan: no subprocess import, no shell call, no pty access anywhere in the execution layer
 
 ---
