@@ -15,9 +15,12 @@ DRY_RUN gate is armed.
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, Mapping, Sequence
+from types import MappingProxyType
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -32,20 +35,31 @@ REVIEW_THRESHOLD = Decimal("10000.00")
 ARTIFACTS_DIR = Path("artifacts")
 PERSIST_PATH = ARTIFACTS_DIR / "compliance_records.jsonl"
 
+_RECORD_KEYS = frozenset(ComplianceRecord.model_fields.keys())
+_PERSIST_EXTRA_KEYS = frozenset({"review_flag", "review_threshold"})
 
-def _record_to_dict(record: ComplianceRecord) -> Dict[str, Any]:
+
+def _record_to_dict(record: ComplianceRecord) -> dict[str, Any]:
     data = record.model_dump()
     data["amount"] = str(record.amount)
     return data
 
 
-def _parse_record(data: Dict[str, Any]) -> ComplianceRecord:
+def _parse_record(
+    data: dict[str, Any],
+    allowed_extra: frozenset[str] = frozenset(),
+) -> ComplianceRecord:
     """Boundary gate shared by every step: re-validate, never trust."""
-    fields = {k: data[k] for k in ComplianceRecord.model_fields if k in data}
+    if not isinstance(data, Mapping):
+        raise TypeError("step input must be a mapping")
+    unexpected = set(data.keys()) - (_RECORD_KEYS | allowed_extra)
+    if unexpected:
+        raise ValueError(f"unexpected keys in step input: {sorted(unexpected)}")
+    fields = {k: data[k] for k in _RECORD_KEYS if k in data}
     return ComplianceRecord.model_validate(fields)
 
 
-def step_validate(data: Dict[str, Any]) -> StepResult:
+def step_validate(data: dict[str, Any]) -> StepResult:
     """Pydantic gate: the payload must be a well-formed ComplianceRecord."""
     try:
         record = ComplianceRecord.model_validate(data)
@@ -58,11 +72,11 @@ def step_validate(data: Dict[str, Any]) -> StepResult:
     return StepResult(step="validate", ok=True, output=_record_to_dict(record))
 
 
-def step_transform(data: Dict[str, Any]) -> StepResult:
+def step_transform(data: dict[str, Any]) -> StepResult:
     """Fixed business rule: flag records at or above the review threshold."""
     try:
         record = _parse_record(data)
-    except (ValidationError, KeyError) as exc:
+    except (ValidationError, KeyError, TypeError, ValueError) as exc:
         return StepResult(
             step="transform",
             ok=False,
@@ -91,7 +105,7 @@ def _already_persisted(record_id: str) -> bool:
     return False
 
 
-def step_persist(data: Dict[str, Any]) -> StepResult:
+def step_persist(data: dict[str, Any]) -> StepResult:
     """Side-effectful: append the reviewed record to the artifacts file.
 
     The Governor blocks this step before invocation while DRY_RUN is
@@ -103,15 +117,25 @@ def step_persist(data: Dict[str, Any]) -> StepResult:
     success.
     """
     try:
-        record = _parse_record(data)
-    except (ValidationError, KeyError) as exc:
+        record = _parse_record(data, allowed_extra=_PERSIST_EXTRA_KEYS)
+    except (ValidationError, KeyError, TypeError, ValueError) as exc:
         return StepResult(
             step="persist",
             ok=False,
             error=f"persist input rejected: {type(exc).__name__}",
         )
+    expected_flag = record.amount >= REVIEW_THRESHOLD
+    if "review_flag" in data and (
+        not isinstance(data["review_flag"], bool)
+        or data["review_flag"] != expected_flag
+    ):
+        return StepResult(
+            step="persist",
+            ok=False,
+            error="persist input rejected: review_flag mismatch",
+        )
     row = _record_to_dict(record)
-    row["review_flag"] = bool(data.get("review_flag", False))
+    row["review_flag"] = expected_flag
     try:
         if _already_persisted(record.record_id):
             output = dict(row)
@@ -122,6 +146,8 @@ def step_persist(data: Dict[str, Any]) -> StepResult:
         serialized = json.dumps(row, sort_keys=True)
         with PERSIST_PATH.open("a", encoding="utf-8") as handle:
             handle.write(serialized + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         # Read-after-write verification: trust the disk, not the call.
         with PERSIST_PATH.open("r", encoding="utf-8") as handle:
             written = [line for line in handle if line.strip()]
@@ -144,6 +170,13 @@ COMPLIANCE_WORKFLOW: Sequence[WorkflowStep] = (
     WorkflowStep(name="persist", run=step_persist, side_effectful=True),
 )
 
+ROUTING_TABLE: Mapping[IntentType, Sequence[WorkflowStep]] = MappingProxyType(
+    {
+        IntentType.SUBMIT_COMPLIANCE_RECORD: COMPLIANCE_WORKFLOW,
+        IntentType.UNSUPPORTED: (),
+    }
+)
+
 
 def build_routing_table() -> Mapping[IntentType, Sequence[WorkflowStep]]:
     """Complete static intent-to-workflow map.
@@ -151,7 +184,4 @@ def build_routing_table() -> Mapping[IntentType, Sequence[WorkflowStep]]:
     UNSUPPORTED deliberately routes to nothing; the Governor halts on it
     with a typed unsupported_intent reason.
     """
-    return {
-        IntentType.SUBMIT_COMPLIANCE_RECORD: COMPLIANCE_WORKFLOW,
-        IntentType.UNSUPPORTED: (),
-    }
+    return ROUTING_TABLE

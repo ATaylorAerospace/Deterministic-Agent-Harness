@@ -9,12 +9,27 @@ past that point is validated, frozen, and routed by static tables.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def _reject_non_finite_floats(value: Any) -> None:
+    """Reject NaN and Infinity anywhere inside a nested payload structure."""
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"non-finite float {value!r} is not permitted")
+    if isinstance(value, Mapping):
+        for k, v in value.items():
+            _reject_non_finite_floats(k)
+            _reject_non_finite_floats(v)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            _reject_non_finite_floats(item)
 
 
 class IntentType(str, Enum):
@@ -51,16 +66,17 @@ class IntentEnvelope(BaseModel):
 
     intent: IntentType
     confidence: float = Field(ge=0.0, le=1.0)
-    payload: Dict[str, Any] = Field(default_factory=dict)
+    payload: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("payload")
     @classmethod
-    def payload_keys_must_be_identifiers(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+    def payload_keys_must_be_identifiers(cls, value: dict[str, Any]) -> dict[str, Any]:
         for key in value:
             if not isinstance(key, str) or not key.isidentifier():
                 raise ValueError(
                     f"payload key {key!r} is not a valid Python identifier"
                 )
+        _reject_non_finite_floats(value)
         return value
 
 
@@ -88,8 +104,14 @@ class StepResult(BaseModel):
 
     step: str
     ok: bool
-    output: Dict[str, Any] = Field(default_factory=dict)
-    error: Optional[str] = None
+    output: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+
+    @field_validator("output")
+    @classmethod
+    def output_must_contain_finite_numbers(cls, value: dict[str, Any]) -> dict[str, Any]:
+        _reject_non_finite_floats(value)
+        return value
 
 
 def _utc_now() -> datetime:
@@ -110,7 +132,7 @@ class AuditEvent(BaseModel):
     run_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     seq: int = Field(ge=0)
     timestamp: datetime = Field(default_factory=_utc_now)
-    details: Dict[str, Any] = Field(default_factory=dict)
+    details: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("timestamp")
     @classmethod
