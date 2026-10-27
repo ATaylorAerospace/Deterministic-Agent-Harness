@@ -16,12 +16,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any
 
 GENESIS_HASH = "0" * 64
 
 
-def _canonical(payload: Dict[str, Any]) -> str:
+def _canonical(payload: dict[str, Any]) -> str:
     """Canonical JSON: sorted keys, compact separators, no NaN.
 
     record() and verify() both hash this exact form, so the chain check
@@ -32,9 +32,13 @@ def _canonical(payload: Dict[str, Any]) -> str:
     )
 
 
-def _chain_hash(prev_hash: str, entry: Dict[str, Any]) -> str:
+def _chain_hash(prev_hash: str, entry: dict[str, Any]) -> str:
     material = prev_hash + _canonical(entry)
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _reject_constant(constant: str) -> Any:
+    raise ValueError(f"non-standard JSON constant {constant!r} is not allowed")
 
 
 class FlightRecorder:
@@ -62,7 +66,7 @@ class FlightRecorder:
             return GENESIS_HASH
         return json.loads(last_line)["hash"]
 
-    def record(self, entry: Dict[str, Any]) -> str:
+    def record(self, entry: dict[str, Any]) -> str:
         """Append one entry and return its chain hash."""
         if not isinstance(entry, dict):
             raise TypeError("Flight Recorder entries must be dictionaries")
@@ -75,7 +79,7 @@ class FlightRecorder:
         self._prev_hash = line_hash
         return line_hash
 
-    def verify(self) -> Tuple[bool, int]:
+    def verify(self) -> tuple[bool, int]:
         """Walk the log and recompute the chain.
 
         Returns (True, line_count) for a clean log, or
@@ -91,16 +95,29 @@ class FlightRecorder:
                 if not raw.strip():
                     continue
                 try:
-                    line = json.loads(raw)
+                    line = json.loads(raw, parse_constant=_reject_constant)
+                    if not isinstance(line, dict) or set(line.keys()) != {
+                        "entry",
+                        "prev",
+                        "hash",
+                    }:
+                        return False, number
                     entry = line["entry"]
                     claimed_prev = line["prev"]
                     claimed_hash = line["hash"]
+                    if (
+                        not isinstance(entry, dict)
+                        or not isinstance(claimed_prev, str)
+                        or not isinstance(claimed_hash, str)
+                    ):
+                        return False, number
+                    computed_hash = _chain_hash(prev_hash, entry)
                 except (ValueError, KeyError, TypeError):
                     return False, number
                 if claimed_prev != prev_hash:
                     return False, number
-                if _chain_hash(prev_hash, entry) != claimed_hash:
+                if computed_hash != claimed_hash:
                     return False, number
                 prev_hash = claimed_hash
-                count = number
+                count += 1
         return True, count

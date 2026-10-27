@@ -16,17 +16,36 @@ ever invoked.
 
 from __future__ import annotations
 
+import math
 import os
 import uuid
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence
+from typing import Any
 
 from pydantic import ValidationError
 
-from schemas.models import AuditEvent, HaltReason, IntentEnvelope, IntentType, StepResult
+from schemas.models import (
+    AuditEvent,
+    HaltReason,
+    IntentEnvelope,
+    IntentType,
+    StepResult,
+)
 from src.logger import FlightRecorder
+
+
+def _audit_safe(value: Any) -> Any:
+    """Normalize raw pre-validation input so audit serialization cannot fail on NaN/Inf."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return repr(value)
+    if isinstance(value, Mapping):
+        return {str(k): _audit_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_audit_safe(item) for item in value]
+    return value
 
 
 class State(str, Enum):
@@ -75,7 +94,7 @@ class WorkflowStep:
     step's output dictionary and must return a typed StepResult."""
 
     name: str
-    run: Callable[[Dict[str, Any]], StepResult]
+    run: Callable[[dict[str, Any]], StepResult]
     side_effectful: bool = False
 
 
@@ -88,9 +107,9 @@ class RunOutcome:
     """
 
     final_state: State
-    halt_reason: Optional[HaltReason]
+    halt_reason: HaltReason | None
     detail: str
-    output: Dict[str, Any]
+    output: dict[str, Any]
     run_id: str
 
 
@@ -102,7 +121,9 @@ class Governor:
         routing_table: Mapping[IntentType, Sequence[WorkflowStep]],
         recorder: FlightRecorder,
     ) -> None:
-        self._routing = dict(routing_table)
+        self._routing: Mapping[IntentType, Sequence[WorkflowStep]] = MappingProxyType(
+            {intent: tuple(steps) for intent, steps in routing_table.items()}
+        )
         self._recorder = recorder
         self._state = State.IDLE
         self._run_id = uuid.uuid4().hex
@@ -116,7 +137,11 @@ class Governor:
     def run_id(self) -> str:
         return self._run_id
 
-    def _audit(self, event: str, details: Dict[str, Any]) -> None:
+    @property
+    def routing_table(self) -> Mapping[IntentType, Sequence[WorkflowStep]]:
+        return self._routing
+
+    def _audit(self, event: str, details: dict[str, Any]) -> None:
         record = AuditEvent(
             event=event, run_id=self._run_id, seq=self._seq, details=details
         )
@@ -151,37 +176,39 @@ class Governor:
         # only guarantee, so audit best-effort and force a terminal state.
         try:
             self._audit("halt", {"reason": reason.value, "detail": detail})
-            if self._state not in TERMINAL_STATES:
-                if State.HALTED in TRANSITIONS[self._state]:
-                    self._transition(State.HALTED)
-        except Exception:
+            if (
+                self._state not in TERMINAL_STATES
+                and State.HALTED in TRANSITIONS[self._state]
+            ):
+                self._transition(State.HALTED)
+        except Exception:  # noqa: BLE001, S110
             pass
         finally:
             if self._state not in TERMINAL_STATES:
                 self._state = State.HALTED
         return RunOutcome(
-            final_state=self._state,
+            final_state=State.HALTED,
             halt_reason=reason,
             detail=detail,
             output={},
             run_id=self._run_id,
         )
 
-    def run(self, raw_intent: Dict[str, Any]) -> RunOutcome:
+    def run(self, raw_intent: dict[str, Any]) -> RunOutcome:
         """Drive one intent through the FSM. Never raises."""
         try:
             return self._run(raw_intent)
-        except Exception as exc:  # pragma: no cover - defensive last resort
+        except Exception as exc:  # noqa: BLE001  # pragma: no cover - defensive last resort
             return self._halt(HaltReason.STEP_FAILURE, f"unhandled: {exc!r}")
 
-    def _run(self, raw_intent: Dict[str, Any]) -> RunOutcome:
+    def _run(self, raw_intent: dict[str, Any]) -> RunOutcome:
         if self._state is not State.IDLE:
             return self._halt(
                 HaltReason.ILLEGAL_TRANSITION,
                 f"run() requires IDLE, machine is {self._state.value}",
             )
 
-        self._audit("input_received", {"raw": raw_intent})
+        self._audit("input_received", {"raw": _audit_safe(raw_intent)})
         if not self._transition(State.INTENT_RECEIVED):
             return self._halt(HaltReason.ILLEGAL_TRANSITION, "cannot leave IDLE")
 
@@ -205,7 +232,7 @@ class Governor:
         if not self._transition(State.EXECUTING):
             return self._halt(HaltReason.ILLEGAL_TRANSITION, "cannot enter EXECUTING")
 
-        data: Dict[str, Any] = dict(envelope.payload)
+        data: dict[str, Any] = dict(envelope.payload)
         for index, step in enumerate(steps):
             if index >= MAX_STEPS_PER_RUN:
                 return self._halt(
@@ -220,7 +247,7 @@ class Governor:
             self._audit("step_input", {"step": step.name, "input": data})
             try:
                 result = step.run(data)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 return self._halt(
                     HaltReason.STEP_FAILURE, f"step {step.name!r} raised {type(exc).__name__}"
                 )

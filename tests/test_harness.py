@@ -22,7 +22,13 @@ from src.governor import (
     dry_run_armed,
 )
 from src.logger import FlightRecorder
-from workflows.example_workflow import PERSIST_PATH, build_routing_table
+from workflows.example_workflow import (
+    PERSIST_PATH,
+    ROUTING_TABLE,
+    build_routing_table,
+    step_persist,
+    step_transform,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -60,6 +66,16 @@ def test_terminal_states_have_no_outgoing_edges():
 
 def test_every_state_appears_in_transition_table():
     assert set(TRANSITIONS.keys()) == set(State)
+
+
+def test_routing_table_is_frozen_and_immutable(tmp_path):
+    table = build_routing_table()
+    assert table is ROUTING_TABLE
+    with pytest.raises(TypeError):
+        table[IntentType.UNSUPPORTED] = ()  # type: ignore[index]
+    governor = make_governor(tmp_path)
+    with pytest.raises(TypeError):
+        governor.routing_table[IntentType.UNSUPPORTED] = ()  # type: ignore[index]
 
 
 # -------------------------------------------------------------- happy path
@@ -147,6 +163,20 @@ def test_confidence_bounds_enforced(confidence):
         )
 
 
+@pytest.mark.parametrize("bad_float", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_floats_rejected_as_schema_violation(tmp_path, bad_float):
+    recorder = FlightRecorder(tmp_path / "audit.jsonl")
+    governor = Governor(build_routing_table(), recorder)
+    intent = good_intent()
+    intent["payload"]["extra_metric"] = [bad_float]
+    outcome = governor.run(intent)
+    assert outcome.final_state is State.HALTED
+    assert outcome.halt_reason is HaltReason.SCHEMA_VIOLATION
+    ok, count = recorder.verify()
+    assert ok is True
+    assert count > 0
+
+
 def test_unsupported_intent_halts_safely(tmp_path):
     outcome = make_governor(tmp_path).run(
         {"intent": "unsupported", "confidence": 0.5, "payload": {}}
@@ -175,12 +205,41 @@ def test_malformed_domain_record_fails_at_validate_gate(tmp_path, monkeypatch):
     assert not PERSIST_PATH.exists()
 
 
+def test_step_transform_and_persist_enforce_boundary_contracts():
+    smuggled = dict(GOOD_PAYLOAD, injected="unexpected")
+    transform_res = step_transform(smuggled)
+    assert transform_res.ok is False
+    assert "ValueError" in (transform_res.error or "")
+
+    persist_extra = dict(GOOD_PAYLOAD, injected="unexpected")
+    persist_res = step_persist(persist_extra)
+    assert persist_res.ok is False
+    assert "ValueError" in (persist_res.error or "")
+
+    forged_flag = dict(GOOD_PAYLOAD, review_flag=False)
+    forged_res = step_persist(forged_flag)
+    assert forged_res.ok is False
+    assert "review_flag" in (forged_res.error or "")
+
+
 def test_governor_cannot_be_rerun_from_terminal_state(tmp_path):
     governor = make_governor(tmp_path)
     governor.run({"intent": "unsupported", "confidence": 0.5, "payload": {}})
     outcome = governor.run(good_intent())
     assert outcome.final_state is State.HALTED
     assert outcome.halt_reason is HaltReason.ILLEGAL_TRANSITION
+
+
+def test_governor_cannot_be_rerun_from_completed_state(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DRY_RUN", "false")
+    governor = make_governor(tmp_path)
+    first = governor.run(good_intent())
+    assert first.final_state is State.COMPLETED
+    second = governor.run(good_intent())
+    assert second.final_state is State.HALTED
+    assert second.halt_reason is HaltReason.ILLEGAL_TRANSITION
+    assert governor.state is State.COMPLETED
 
 
 # ----------------------------------------------------------- Flight Recorder
@@ -205,6 +264,27 @@ def test_flight_recorder_detects_doctored_line(tmp_path):
     doctored["entry"]["i"] = 999
     lines[1] = json.dumps(doctored, sort_keys=True, separators=(",", ":"))
     log.write_text("\n".join(lines) + "\n")
+    ok, bad_line = recorder.verify()
+    assert ok is False
+    assert bad_line == 2
+
+
+def test_flight_recorder_detects_extra_wrapper_keys_and_blank_lines(tmp_path):
+    log = tmp_path / "audit.jsonl"
+    recorder = FlightRecorder(log)
+    recorder.record({"event": "one"})
+    recorder.record({"event": "two"})
+    raw_lines = log.read_text(encoding="utf-8").splitlines()
+    log.write_text(raw_lines[0] + "\n\n" + raw_lines[1] + "\n", encoding="utf-8")
+    ok, count = recorder.verify()
+    assert ok is True
+    assert count == 2
+
+    tampered = json.loads(raw_lines[1])
+    tampered["extra"] = "injected"
+    log.write_text(
+        raw_lines[0] + "\n" + json.dumps(tampered) + "\n", encoding="utf-8"
+    )
     ok, bad_line = recorder.verify()
     assert ok is False
     assert bad_line == 2
